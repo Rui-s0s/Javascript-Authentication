@@ -9,7 +9,8 @@ const VALID_TOKENS = {
 
 const router = express.Router();
 
-// ✅ Helper: validate one log
+// Funcion para validar que un log este en el formato correcto
+
 function validateLog(log) {
   const required = ["timestamp", "service", "severity", "message"];
   const missing = required.filter((key) => !(key in log));
@@ -19,7 +20,8 @@ function validateLog(log) {
   return null;
 }
 
-// ✅ Helper: extract token
+// Funcion para extrar del header el token
+
 function getTokenAndOwner(req) {
   const auth = req.headers["authorization"] || "";
   if (!auth.startsWith("Token ")) return [null, null];
@@ -28,10 +30,15 @@ function getTokenAndOwner(req) {
   return [token, owner];
 }
 
-// ✅ Endpoint: POST /logs
+// Endpoint POST
+// req = cliente a servidor, res = servidor a cliente
 router.post("/", (req, res) => {
-  const [token, owner] = getTokenAndOwner(req);
-  if (!owner) return res.status(401).json({ error: "Invalid token" });
+  console.log(`Request de POST iniciada ${new Date().toLocaleString()}`)                                          
+  const [token, owner] = getTokenAndOwner(req);                           // Verificamos el token, si existe continuamos de otro modo devuelve un error
+  if (!owner) {
+    console.log(`Request de POST fallida por token invalido`)
+    return res.status(401).json({ error: "Invalid token" });
+  }
 
   const now = new Date().toISOString();
   const data = req.body;
@@ -39,12 +46,12 @@ router.post("/", (req, res) => {
 
   let accepted = 0;
   let failed = 0;
-  const errors = [];
+  const errors = [];                                                      // Preparamos una declaracion de sql para agregar elementos a la base de datos
 
-  const insert = db.prepare(`
+  const insert = db.prepare(`                                             
     INSERT INTO logs (timestamp, service, severity, message, received_at, token_used)
     VALUES (?, ?, ?, ?, ?, ?)
-  `);
+  `); 
 
   for (const log of logs) {
     const error = validateLog(log);
@@ -69,6 +76,7 @@ router.post("/", (req, res) => {
       errors.push(err.message);
     }
   }
+  console.log(`Resultados de POST aceptados: ${accepted} fallos: ${failed}`)
 
   return res.status(accepted ? 200 : 400).json({
     accepted,
@@ -77,96 +85,77 @@ router.post("/", (req, res) => {
   });
 });
 
-// ✅ Endpoint: GET /logs
+// Enpoint GET
+// req = cliente a servidor, res = servidor a cliente
+
 router.get("/", (req, res) => {
-    // Access query parameters from req.query
-    const qp = req.query;
 
-    const timestamp_start   = qp.timestamp_start;
-    const timestamp_end     = qp.timestamp_end;
-    const received_at_start = qp.received_at_start;
-    const received_at_end   = qp.received_at_end;
-    const service           = qp.service;
-    const severity          = qp.severity;
+  console.log(`Request de GET iniciada ${new Date().toLocaleString()}`)
 
-    let limit, offset;
+  const {
+    service,
+    severity,
+    limit = 10,
+    offset = 0,
+    timestamp_start,
+    timestamp_end,
+    received_at_start,
+    received_at_end,
+  } = req.query;
+  
+  const clauses = [];
+  const params = [];
 
-    try {
-        // Use unary plus (+) or parseInt for conversion, with fallback
-        limit  = parseInt(qp.limit) || 100;
-        offset = parseInt(qp.offset) || 0;
+  if (service && service !== "all") {
+    clauses.push("service = ?");
+    params.push(service);
+  }
 
-        // Basic validation for non-positive values
-        if (limit <= 0 || offset < 0) {
-             return res.status(400).json({ error: "limit debe ser positivo y offset no puede ser negativo" });
-        }
-    } catch (e) {
-        // In JavaScript, parseInt handles non-numeric strings gracefully (results in NaN),
-        // but it's good practice to check if the result is a number.
-        if (isNaN(limit) || isNaN(offset)) {
-            return res.status(400).json({ error: "limit/offset deben ser enteros" });
-        }
-    }
+  if (severity && severity !== "all") {
+    clauses.push("severity = ?")
+    params.push(severity)
+  }
 
-    const clauses = [];
-    const params = [];
+  // --- timestamp range ---
+  if (timestamp_start) {
+    clauses.push("timestamp >= ?");
+    params.push(timestamp_start);
+  }
+  if (timestamp_end) {
+    clauses.push("timestamp <= ?");
+    params.push(timestamp_end);
+  }
 
-    // --- Dynamic WHERE Clause Construction ---
+  // --- received_at range ---
+  if (received_at_start) {
+    clauses.push("received_at >= ?");
+    params.push(received_at_start);
+  }
+  if (received_at_end) {
+    clauses.push("received_at <= ?");
+    params.push(received_at_end);
+  }
+  
+  const whereSql = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const sql = `
+    SELECT id, timestamp, service, severity, message, received_at, token_used
+    FROM logs
+    ${whereSql}
+    ORDER BY received_at DESC, id DESC
+    LIMIT ? OFFSET ?
+  `;
 
-    if (timestamp_start) {
-        clauses.push("timestamp >= ?");
-        params.push(timestamp_start);
-    }
-    if (timestamp_end) {
-        clauses.push("timestamp <= ?");
-        params.push(timestamp_end);
-    }
-    if (received_at_start) {
-        clauses.push("received_at >= ?");
-        params.push(received_at_start);
-    }
-    if (received_at_end) {
-        clauses.push("received_at <= ?");
-        params.push(received_at_end);
-    }
-    if (service) {
-        clauses.push("service = ?");
-        params.push(service);
-    }
-    if (severity) {
-        clauses.push("severity = ?");
-        params.push(severity);
-    }
+  params.push(Number(limit), Number(offset));
 
-    // Assemble the WHERE clause
-    const whereSql = clauses.length > 0 ? "WHERE " + clauses.join(" AND ") : "";
-
-    // Final SQL Query
-    const sql = `
-        SELECT id, timestamp, service, severity, message, received_at, token_used
-        FROM logs
-        ${whereSql}
-        ORDER BY received_at DESC, id DESC
-        LIMIT ? OFFSET ?
-    `;
-
-    // Add pagination parameters for the final placeholders
-    params.push(limit, offset);
-
-    try {
-        // Use the db connection object (assuming better-sqlite3)
-        // prepare() creates a statement, all() executes it with params and fetches all rows
-        const statement = db.prepare(sql);
-        const rows = statement.all(...params); // ...spreads the params array
-
-        // Send the JSON response
-        return res.json({ count: rows.length, results: rows });
-
-    } catch (error) {
-        // Handle database or unexpected errors
-        console.error("Database query failed:", error.message);
-        return res.status(500).json({ error: "Error interno del servidor al consultar logs." });
-    }
+  try {
+    const rows = db.prepare(sql).all(...params);
+    console.log(`Request de GET exitosa`)
+    return res.json({ count: rows.length, results: rows });
+  } catch (error) {
+    console.error("Database query failed:", error.message);
+    return res.status(500).json({ error: "Error interno del servidor." });
+  }
 });
+
 
 export default router;
